@@ -12,9 +12,7 @@ _SKILLS_DIR: Optional[Path] = None
 # 本 pipeline 的 agent 名 → AI-Research-SKILLs 相对路径（仅 research 相关有映射）
 AI_RESEARCH_SKILLS_MAP = {
     "ideator": "21-research-ideation/brainstorming-research-ideas/SKILL.md",
-    "writer": "20-ml-paper-writing/SKILL.md",
-    "editor": "20-ml-paper-writing/SKILL.md",
-    # scout, deep_researcher, skeptic 无直接对应，用本地 skills
+    # deep_researcher, skeptic, experimenter 无直接对应，用本地 skills
 }
 
 # 使用外部 skill 时追加的「必须输出 JSON」约定，保证 pipeline 能解析
@@ -24,16 +22,6 @@ PIPELINE_OUTPUT_APPENDIX = {
 ## EfficientResearch pipeline output (mandatory)
 
 Return a single JSON object with key "hypotheses", value an array of objects. Each object must have: id, claim, falsifiable_test, minimal_experiment, expected_gain, risks. No other top-level keys. No markdown outside the JSON.""",
-    "writer": """
-
-## EfficientResearch pipeline output (mandatory)
-
-Output a JSON object with key "sections", value object with keys: abstract, intro, background, method, experiments, results, related_work, limitations, conclusion. Each value is LaTeX body. Tag claims with [CITE:key], [EVID:run_id], or [SPEC]. No markdown outside the JSON.""",
-    "editor": """
-
-## EfficientResearch pipeline output (mandatory)
-
-Output the same JSON structure: key "sections", object with abstract, intro, background, method, experiments, results, related_work, limitations, conclusion. Preserve all [CITE:...], [EVID:...], [SPEC] tags. No markdown outside the JSON.""",
 }
 
 def get_ai_research_skills_root() -> Optional[Path]:

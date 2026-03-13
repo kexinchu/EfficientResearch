@@ -1,1 +1,1 @@
-# Agents: ideator, scout, deep_researcher, skeptic, writer, editor
+# Agents: ideator, deep_researcher, skeptic, experimenter

@@ -1,29 +1,28 @@
-"""Local RAG: index run artifacts for long-term memory; query by topic when needed.
+"""Local RAG: index Obsidian notes and Zotero papers for context retrieval.
+
+Uses ChromaDB (vector store) + sentence-transformers (embeddings).
+Indexes paper notes, idea notes, and explore reports from the Obsidian vault.
 
 Usage:
-  - After a run (or on demand): index_run_artifacts(artifacts/runs) to chunk and embed 01_ideator..06_writer.
-  - When starting a run or in an agent: query(topic, k=5) to get relevant past snippets to inject into prompts.
+  - index_obsidian_vault() to scan and index all notes
+  - index_paper_note(path) to index a single note after creation
+  - query(topic, k=10) to retrieve relevant context
+  - format_retrieved_for_prompt(results) to inject into LLM prompts
 
-Requires: chromadb, sentence-transformers (see requirements.txt).
+Requires: pip install researchbot[rag]
 """
-import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_RAG_DIR_ENV = "EFFICIENT_RESEARCH_RAG_DIR"
-_DEFAULT_RAG_DIR = "rag"
 _COLLECTION_NAME = "researchbot"
 
 
-def _get_rag_dir(artifacts_root: Optional[str] = None) -> Path:
-    d = os.environ.get(_RAG_DIR_ENV, "").strip()
-    if d:
-        return Path(d).expanduser().resolve()
-    if artifacts_root:
-        return Path(artifacts_root) / "rag"
-    return Path(_DEFAULT_RAG_DIR).resolve()
+def _get_rag_dir() -> Path:
+    from researchbot.config import get_rag_dir
+    return Path(get_rag_dir()).expanduser().resolve()
 
 
 def _get_client(rag_dir: Path):
@@ -35,8 +34,9 @@ def _get_client(rag_dir: Path):
 def _get_embedding_function():
     try:
         from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+        from researchbot.config import get_rag_embedding_model
         return SentenceTransformerEmbeddingFunction(
-            model_name="all-MiniLM-L6-v2",
+            model_name=get_rag_embedding_model(),
             normalize_embeddings=True,
         )
     except Exception:
@@ -48,144 +48,212 @@ def _ensure_collection(rag_dir: Path):
     ef = _get_embedding_function()
     if ef is None:
         raise RuntimeError(
-            "RAG 需要 chromadb 与 sentence-transformers。请执行: pip install chromadb sentence-transformers"
+            "RAG requires chromadb and sentence-transformers. Run: pip install researchbot[rag]"
         )
     return client.get_or_create_collection(
         name=_COLLECTION_NAME,
         embedding_function=ef,
-        metadata={"description": "ResearchBot run artifacts"},
+        metadata={"description": "ResearchBot paper notes, ideas, and research context"},
     )
 
 
-def _chunk_state_to_documents(state: Dict[str, Any], source: str, run_id: str) -> List[Dict[str, Any]]:
-    """Turn pipeline state (or a single stage payload) into list of {text, metadata} for indexing."""
+# ── Parse Obsidian notes ──────────────────────────────────────────────────────
+
+def _parse_obsidian_note(filepath: Path) -> Optional[Dict[str, Any]]:
+    """Parse an Obsidian markdown note with YAML frontmatter.
+
+    Returns dict with 'frontmatter' and 'body', or None if not a valid note.
+    """
+    try:
+        content = filepath.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+    frontmatter = {}
+    body = content
+
+    # Parse YAML frontmatter
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", content, re.DOTALL)
+    if m:
+        try:
+            import yaml
+            frontmatter = yaml.safe_load(m.group(1)) or {}
+        except Exception:
+            pass
+        body = m.group(2).strip()
+
+    if not frontmatter and not body:
+        return None
+
+    return {"frontmatter": frontmatter, "body": body, "path": str(filepath)}
+
+
+def _note_to_documents(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Convert a parsed Obsidian note into indexable document chunks."""
+    fm = parsed.get("frontmatter", {})
+    body = parsed.get("body", "")
+    path = parsed.get("path", "")
+    note_type = fm.get("type", "unknown")
+    title = fm.get("title", Path(path).stem if path else "untitled")
+
     docs = []
-    # Hypotheses
-    for i, h in enumerate(state.get("hypotheses") or []):
-        if isinstance(h, dict):
-            text = f"Hypothesis: {h.get('claim', '')} Evidence: {h.get('evidence', '')} ID: {h.get('id', '')}"
-            if text.strip():
-                docs.append({"text": text, "source": source, "stage": "hypotheses", "run_id": run_id})
-    # Ideator four-step (related work, unsolved, research-worthy, proposals)
-    rw_sum = state.get("related_work_summary") or ""
-    if rw_sum.strip():
-        docs.append({"text": f"Related work summary: {rw_sum[:1500]}", "source": source, "stage": "ideator_related_work", "run_id": run_id})
-    for i, u in enumerate(state.get("unsolved_problems") or [])[:5]:
-        if isinstance(u, dict) and (u.get("problem") or u.get("context")):
-            docs.append({"text": f"Unsolved: {u.get('problem', '')} — {u.get('context', '')}", "source": source, "stage": "ideator_unsolved", "run_id": run_id})
-    for i, r in enumerate(state.get("research_worthy") or [])[:5]:
-        if isinstance(r, dict) and (r.get("problem") or r.get("rationale")):
-            docs.append({"text": f"Research-worthy: {r.get('problem', '')} — {r.get('rationale', '')}", "source": source, "stage": "ideator_research_worthy", "run_id": run_id})
-    for i, p in enumerate(state.get("proposals") or [])[:4]:
-        if isinstance(p, dict) and (p.get("idea") or p.get("motivation")):
-            ch = p.get("challenges") or []
-            ch_str = "; ".join(str(c) for c in ch[:5]) if isinstance(ch, list) else str(ch)
-            docs.append({"text": f"Proposal: {p.get('motivation', '')} Idea: {p.get('idea', '')} Challenges: {ch_str}", "source": source, "stage": "ideator_proposal", "run_id": run_id})
-    # Contribution
-    cs = state.get("contribution_statement") or state.get("paper_title") or ""
-    if cs.strip():
-        docs.append({"text": f"Contribution / title: {cs}", "source": source, "stage": "contribution", "run_id": run_id})
-    # Scout
-    scout = state.get("scout_output") or {}
-    if scout:
-        rw = scout.get("related_work") or ""
-        if rw.strip():
-            docs.append({"text": f"Related work: {rw[:2000]}", "source": source, "stage": "scout", "run_id": run_id})
-    # Deep research
-    deep = state.get("deep_research_output") or {}
-    if deep:
-        gap = deep.get("gap_summary") or ""
-        if gap.strip():
-            docs.append({"text": f"Gap summary: {gap}", "source": source, "stage": "deep_research", "run_id": run_id})
-    # Skeptic
-    skeptic = state.get("skeptic_output") or {}
-    if skeptic:
-        risks = skeptic.get("rejection_risks") or []
-        req_exp = skeptic.get("required_experiments") or []
-        t = "Risks: " + " | ".join(str(r) for r in risks[:10]) + " Required experiments: " + " | ".join(str(e) for e in req_exp[:10])
-        if t.strip():
-            docs.append({"text": t, "source": source, "stage": "skeptic", "run_id": run_id})
-    # Experimenter
-    exp = state.get("experimenter_output") or {}
-    if exp:
-        plan = exp.get("experiment_plan") or []
-        for i, p in enumerate(plan[:5]):
-            if isinstance(p, dict):
-                text = f"Experiment: {p.get('name', '')} {p.get('expected_outcome', '')}"
-                if text.strip():
-                    docs.append({"text": text, "source": source, "stage": "experimenter", "run_id": run_id})
-    # Writer sections (summary)
-    wo = state.get("writer_output") or {}
-    sections = wo.get("sections") or {}
-    for key, val in list(sections.items())[:5]:
-        if val and isinstance(val, str) and len(val) > 100:
-            docs.append({
-                "text": f"Section {key}: {val[:1500]}",
-                "source": source,
-                "stage": "writer",
-                "run_id": run_id,
-            })
+
+    # Index metadata summary as one document
+    authors = fm.get("authors", [])
+    if isinstance(authors, list):
+        authors_str = ", ".join(str(a) for a in authors[:10])
+    else:
+        authors_str = str(authors)
+
+    meta_text = f"Paper: {title}"
+    if authors_str:
+        meta_text += f" by {authors_str}"
+    if fm.get("year"):
+        meta_text += f" ({fm['year']})"
+    if fm.get("venue"):
+        meta_text += f" at {fm['venue']}"
+    if fm.get("paper_type"):
+        meta_text += f" [{fm['paper_type']}]"
+
+    tags = fm.get("tags", [])
+    if tags and isinstance(tags, list):
+        meta_text += f" Tags: {', '.join(str(t) for t in tags)}"
+
+    docs.append({
+        "text": meta_text,
+        "source": path,
+        "note_type": note_type,
+        "title": str(title),
+        "doc_part": "metadata",
+    })
+
+    # Index body sections (split by ## headings)
+    sections = re.split(r"\n## ", body)
+    for section in sections:
+        section = section.strip()
+        if not section or len(section) < 20:
+            continue
+        # Prefix with title for context
+        chunk = f"[{title}] {section[:1500]}"
+        docs.append({
+            "text": chunk,
+            "source": path,
+            "note_type": note_type,
+            "title": str(title),
+            "doc_part": "content",
+        })
+
     return docs
 
 
-def index_run_artifacts(
-    runs_dir: str | Path,
-    artifacts_root: Optional[str] = None,
-    run_id: Optional[str] = None,
-) -> int:
-    """Load state from runs_dir (01_ideator..06_writer), chunk into documents, add to RAG. Returns count added."""
-    from researchbot.tools.io import load_state_from_runs, load_json
-    runs_path = Path(runs_dir)
-    if run_id is None:
-        run_id = f"run_{int(time.time())}"
-    state = load_state_from_runs(runs_path)
-    if not state:
-        # Fallback: load each file and merge into a single "state" for chunking
-        state = {}
-        for name in ["01_ideator", "02_scout", "03_deep_research", "04_skeptic", "05_experimenter", "06_writer"]:
-            for p in sorted(runs_path.glob(name + "*.json")):
-                data = load_json(p)
-                if data:
-                    state.update(data)
-                break
-    if not state:
+# ── Index operations ──────────────────────────────────────────────────────────
+
+def index_obsidian_vault(vault_path: Optional[str] = None) -> int:
+    """Scan Obsidian vault and index all markdown notes into RAG.
+
+    Returns count of documents indexed.
+    """
+    from researchbot.config import get_obsidian_vault_path
+
+    vault = Path(vault_path or get_obsidian_vault_path())
+    if not vault.exists():
+        print(f"[rag] Vault not found: {vault}")
         return 0
-    docs = _chunk_state_to_documents(state, source=str(runs_path), run_id=run_id)
-    if not docs:
-        return 0
-    rag_dir = _get_rag_dir(artifacts_root)
+
+    rag_dir = _get_rag_dir()
     rag_dir.mkdir(parents=True, exist_ok=True)
     coll = _ensure_collection(rag_dir)
-    ids = [f"{run_id}_{i}" for i in range(len(docs))]
+
+    all_docs = []
+    for md_file in vault.rglob("*.md"):
+        parsed = _parse_obsidian_note(md_file)
+        if parsed:
+            all_docs.extend(_note_to_documents(parsed))
+
+    if not all_docs:
+        print("[rag] No notes found to index.")
+        return 0
+
+    # Use file path + part as stable ID to allow re-indexing
+    ids = []
+    texts = []
+    metadatas = []
+    for i, doc in enumerate(all_docs):
+        doc_id = f"obs_{hash(doc['source'] + doc['doc_part'] + doc['text'][:50]) & 0xFFFFFFFF}_{i}"
+        ids.append(doc_id)
+        texts.append(doc["text"])
+        metadatas.append({k: v for k, v in doc.items() if k != "text"})
+
+    # Upsert in batches (ChromaDB has limits)
+    batch_size = 500
+    for start in range(0, len(ids), batch_size):
+        end = start + batch_size
+        coll.upsert(
+            ids=ids[start:end],
+            documents=texts[start:end],
+            metadatas=metadatas[start:end],
+        )
+
+    print(f"[rag] Indexed {len(all_docs)} documents from {vault}")
+    return len(all_docs)
+
+
+def index_paper_note(filepath: str | Path) -> int:
+    """Index a single paper note into RAG. Called after writing a note. Returns doc count."""
+    filepath = Path(filepath)
+    parsed = _parse_obsidian_note(filepath)
+    if not parsed:
+        return 0
+
+    docs = _note_to_documents(parsed)
+    if not docs:
+        return 0
+
+    rag_dir = _get_rag_dir()
+    rag_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        coll = _ensure_collection(rag_dir)
+    except RuntimeError:
+        return 0
+
+    ids = [f"obs_{hash(d['source'] + d['doc_part'] + d['text'][:50]) & 0xFFFFFFFF}_{i}" for i, d in enumerate(docs)]
     texts = [d["text"] for d in docs]
     metadatas = [{k: v for k, v in d.items() if k != "text"} for d in docs]
-    coll.add(ids=ids, documents=texts, metadatas=metadatas)
+    coll.upsert(ids=ids, documents=texts, metadatas=metadatas)
     return len(docs)
 
 
+# ── Query ─────────────────────────────────────────────────────────────────────
+
 def query(
     query_text: str,
-    k: int = 5,
-    artifacts_root: Optional[str] = None,
-    run_id_filter: Optional[str] = None,
+    k: int = 10,
+    note_type_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Return top-k relevant chunks from RAG. Each item: {text, source, stage, run_id, distance}."""
-    rag_dir = _get_rag_dir(artifacts_root)
+    """Return top-k relevant chunks from RAG.
+
+    Each item: {text, source, note_type, title, doc_part, distance}.
+    """
+    rag_dir = _get_rag_dir()
     if not rag_dir.exists():
         return []
     try:
         coll = _ensure_collection(rag_dir)
     except RuntimeError:
         return []
+
     where = None
-    if run_id_filter:
-        where = {"run_id": run_id_filter}
+    if note_type_filter:
+        where = {"note_type": note_type_filter}
+
     res = coll.query(
         query_texts=[query_text],
-        n_results=min(k, 20),
+        n_results=min(k, 30),
         where=where,
         include=["documents", "metadatas", "distances"],
     )
+
     out = []
     if res and res["documents"] and res["documents"][0]:
         for i, doc in enumerate(res["documents"][0]):
@@ -194,25 +262,36 @@ def query(
             out.append({
                 "text": doc,
                 "source": meta.get("source", ""),
-                "stage": meta.get("stage", ""),
-                "run_id": meta.get("run_id", ""),
+                "note_type": meta.get("note_type", ""),
+                "title": meta.get("title", ""),
+                "doc_part": meta.get("doc_part", ""),
                 "distance": dist,
             })
     return out
 
 
-def format_retrieved_for_prompt(results: List[Dict[str, Any]], max_chars: int = 3000) -> str:
-    """Turn query() results into a single string to inject into a system or user prompt."""
+def format_retrieved_for_prompt(results: List[Dict[str, Any]], max_chars: int = 4000) -> str:
+    """Format query() results into a string to inject into LLM prompts.
+
+    Groups by note for readability.
+    """
     if not results:
         return ""
+
     parts = []
     total = 0
+    seen_titles = set()
+
     for r in results:
-        seg = f"[{r.get('stage', '')}] {r.get('text', '')}"
+        title = r.get("title", "?")
+        prefix = f"[{r.get('note_type', '?')}]" if r.get("note_type") else ""
+        seg = f"{prefix} {r.get('text', '')}"
+
         if total + len(seg) > max_chars:
-            seg = seg[: max_chars - total]
+            seg = seg[:max_chars - total]
         parts.append(seg)
         total += len(seg)
         if total >= max_chars:
             break
+
     return "\n\n---\n\n".join(parts)

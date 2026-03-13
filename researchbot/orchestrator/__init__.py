@@ -1,1 +1,1 @@
-# Orchestrator: pipeline and state
+# Orchestrator: explore and experiment commands

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "researchbot"
-version = "0.1.0"
-description = "Multi-agent research automation with human-in-the-loop"
+version = "0.2.0"
+description = "Research assistant toolkit: paper management, idea exploration, experiment design, and note organization"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -15,6 +15,7 @@ dependencies = [
     "pyyaml>=6.0",
     "duckduckgo-search>=6.0.0",
     "arxiv>=2.1.0",
+    "pyzotero>=1.5.0",
 ]
 
 [project.optional-dependencies]

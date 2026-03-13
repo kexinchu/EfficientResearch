@@ -47,16 +47,17 @@ def _cache_set(key: str, response: str) -> None:
 
 def get_client():
     from openai import OpenAI
-    from researchbot import config
-    kwargs = {"api_key": config.OPENAI_API_KEY or "sk-placeholder"}
-    if config.OPENAI_BASE_URL:
-        kwargs["base_url"] = config.OPENAI_BASE_URL
+    from researchbot.config import get_openai_api_key, get_openai_base_url
+    kwargs = {"api_key": get_openai_api_key() or "sk-placeholder"}
+    base_url = get_openai_base_url()
+    if base_url:
+        kwargs["base_url"] = base_url
     return OpenAI(**kwargs)
 
 
 def get_model() -> str:
-    from researchbot import config
-    return config.MODEL
+    from researchbot.config import get_model as _get_model
+    return _get_model()
 
 
 def _unwrap_single_list(text: str) -> str:

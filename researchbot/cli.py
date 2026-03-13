@@ -1,183 +1,280 @@
-"""ResearchBot CLI entry point."""
+"""ResearchBot CLI: record, note, explore, experiment."""
 import argparse
-import json
 import sys
-from pathlib import Path
 
 
-INPUT_TEMPLATE = """# ResearchBot Input
+def cmd_record(args):
+    """Record a paper: fetch metadata → Zotero → classify → generate note → Obsidian."""
+    from researchbot.scholar.metadata import fetch_metadata
+    from researchbot.scholar.classifier import classify_paper
+    from researchbot.scholar.note_generator import generate_paper_note
+    from researchbot.scholar.obsidian_writer import write_paper_note
 
-Topic: <your research topic here>
-Venue: Workshop, 4-6 pages, double-column
+    url = args.url
+    print(f"[record] Processing: {url}")
 
-# Optional fields:
-# Constraints: <problem constraints>
-# Sections: experiments,results,conclusion   (only regenerate these sections)
-# Focus: system                              (system | theory | empirical | analysis)
-"""
+    # 1. Fetch metadata
+    print("[record] Fetching metadata...")
+    meta = fetch_metadata(url)
+    if not meta.title:
+        print("[record] ERROR: Could not retrieve paper metadata. Check the URL.", file=sys.stderr)
+        sys.exit(1)
+    print(f"[record] Title: {meta.title}")
+    print(f"[record] Authors: {', '.join(meta.authors[:5])}")
+
+    # 2. Classify
+    print("[record] Classifying paper...")
+    meta.paper_type = classify_paper(meta)
+    print(f"[record] Type: {meta.paper_type}")
+
+    # 3. Zotero (optional, skip if not configured)
+    zotero_key = ""
+    if not args.no_zotero:
+        try:
+            from researchbot.scholar.zotero_client import check_duplicate, add_paper
+
+            dup_key = check_duplicate(meta)
+            if dup_key:
+                print(f"[record] Paper already in Zotero (key: {dup_key}), skipping.")
+                zotero_key = dup_key
+            else:
+                print("[record] Adding to Zotero...")
+                collection_name = f"ResearchBot/{meta.paper_type}"
+                zotero_key = add_paper(meta, collection_name=collection_name)
+                print(f"[record] Zotero key: {zotero_key}")
+        except RuntimeError as e:
+            print(f"[record] Zotero skipped: {e}", file=sys.stderr)
+        except ImportError:
+            print("[record] Zotero skipped: pyzotero not installed. Run: pip install pyzotero", file=sys.stderr)
+
+    # 4. Generate reading note
+    print("[record] Generating reading note...")
+    note = generate_paper_note(meta)
+    note.zotero_key = zotero_key
+
+    # 5. Write to Obsidian
+    vault_path = args.vault if args.vault else None
+    filepath = write_paper_note(note, vault_path=vault_path)
+    print(f"[record] Note saved to: {filepath}")
+
+    # 6. Index into RAG (best-effort)
+    try:
+        from researchbot.tools.rag import index_paper_note
+        count = index_paper_note(filepath)
+        if count:
+            print(f"[record] Indexed {count} chunks into RAG")
+    except Exception:
+        pass
+
+    print("\n========================================")
+    print(f"  Title:     {meta.title}")
+    print(f"  Type:      {meta.paper_type}")
+    print(f"  Zotero:    {zotero_key or 'skipped'}")
+    print(f"  Note:      {filepath}")
+    print("========================================")
+
+
+def cmd_note(args):
+    """Create a note from text input, classify as paper note or idea."""
+    from researchbot.scholar.note_generator import generate_paper_note, generate_idea_note
+    from researchbot.scholar.obsidian_writer import write_paper_note, write_idea_note
+    from researchbot.models import PaperMetadata
+
+    # Read input
+    if args.input:
+        from pathlib import Path
+        text = Path(args.input).read_text(encoding="utf-8")
+    elif not sys.stdin.isatty():
+        text = sys.stdin.read()
+    else:
+        print("Enter your note (Ctrl+D to finish):")
+        lines = []
+        try:
+            while True:
+                lines.append(input())
+        except EOFError:
+            pass
+        text = "\n".join(lines)
+
+    if not text.strip():
+        print("[note] ERROR: No input provided.", file=sys.stderr)
+        sys.exit(1)
+
+    note_type = args.type
+    vault_path = args.vault if args.vault else None
+
+    if note_type == "idea" or (note_type == "auto" and _looks_like_idea(text)):
+        print("[note] Generating idea note...")
+        note = generate_idea_note(text)
+        filepath = write_idea_note(note, vault_path=vault_path)
+        print(f"[note] Idea note saved to: {filepath}")
+    else:
+        print("[note] Generating paper note...")
+        # For paper notes from text, we create minimal metadata
+        meta = PaperMetadata(abstract=text)
+        note = generate_paper_note(meta)
+        filepath = write_paper_note(note, vault_path=vault_path)
+        print(f"[note] Paper note saved to: {filepath}")
+
+    # Index into RAG (best-effort)
+    try:
+        from researchbot.tools.rag import index_paper_note
+        count = index_paper_note(filepath)
+        if count:
+            print(f"[note] Indexed {count} chunks into RAG")
+    except Exception:
+        pass
+
+
+def _looks_like_idea(text: str) -> bool:
+    """Heuristic: if text looks more like a research idea than a paper note."""
+    idea_keywords = ["idea", "hypothesis", "what if", "we could", "I think",
+                     "proposal", "approach", "想法", "假设", "方案"]
+    text_lower = text.lower()
+    score = sum(1 for kw in idea_keywords if kw in text_lower)
+    return score >= 2
+
+
+def cmd_explore(args):
+    """Deep research exploration on a topic."""
+    from researchbot.orchestrator.explore import run_explore
+
+    if args.browser:
+        from researchbot import config
+        config.set_use_browser_llm(True)
+
+    result = run_explore(
+        topic=args.topic,
+        focus=args.focus,
+        save_to_obsidian=args.obsidian,
+        output_dir=args.output,
+    )
+    print(f"\n[explore] Done. Report: {result['report_path']}")
+
+
+def cmd_experiment(args):
+    """Quick experiment design from a research idea."""
+    from researchbot.orchestrator.experiment import run_experiment
+
+    if args.browser:
+        from researchbot import config
+        config.set_use_browser_llm(True)
+
+    # Read idea from args or stdin
+    idea = args.idea
+    if not idea:
+        if not sys.stdin.isatty():
+            idea = sys.stdin.read().strip()
+        else:
+            print("Enter your research idea (Ctrl+D to finish):")
+            lines = []
+            try:
+                while True:
+                    lines.append(input())
+            except EOFError:
+                pass
+            idea = "\n".join(lines)
+
+    if not idea:
+        print("[experiment] ERROR: No idea provided.", file=sys.stderr)
+        sys.exit(1)
+
+    result = run_experiment(
+        idea=idea,
+        save_to_obsidian=args.obsidian,
+        output_dir=args.output,
+    )
+    print(f"\n[experiment] Done. Report: {result['report_path']}")
 
 
 def cmd_init(args):
-    """Create input.md template in CWD."""
-    target = Path.cwd() / "input.md"
+    """Generate config.yaml template."""
+    from pathlib import Path
+    from researchbot.config import CONFIG_TEMPLATE
+
+    if args.glob:
+        target = Path.home() / ".researchbot" / "config.yaml"
+    else:
+        target = Path.cwd() / "config.yaml"
+
     if target.exists() and not args.force:
-        print(f"input.md already exists. Use --force to overwrite.")
+        print(f"config.yaml already exists at {target}. Use --force to overwrite.")
         sys.exit(1)
-    target.write_text(INPUT_TEMPLATE, encoding="utf-8")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(CONFIG_TEMPLATE, encoding="utf-8")
     print(f"Created {target}")
-    print("Edit it with your research topic, then run: researchbot run")
+    print("Edit the file to fill in your API keys and paths, then start using ResearchBot.")
 
 
-def _parse_field(text: str, key: str) -> str:
-    """Parse 'Key: value' from input.md content."""
-    import re
-    pattern = rf"^#*\s*{re.escape(key)}\s*:\s*(.+)"
-    m = re.search(pattern, text, re.MULTILINE | re.IGNORECASE)
-    return m.group(1).strip() if m else ""
-
-
-def cmd_run(args):
-    """Run the research pipeline."""
-    # Determine topic/venue from args or input.md
-    topic = args.topic
-    venue = args.venue
-    constraints = args.constraints
-    sections_arg = args.sections
-    focus = args.focus
-
-    if not topic:
-        input_file = Path.cwd() / "input.md"
-        if not input_file.exists():
-            print("No --topic provided and no input.md found in current directory.")
-            print("Run 'researchbot init' to create one, or pass --topic directly.")
-            sys.exit(1)
-        text = input_file.read_text(encoding="utf-8")
-        topic = _parse_field(text, "Topic")
-        if not topic:
-            # Fallback: first non-empty, non-comment line
-            for line in text.splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    topic = line
-                    break
-        if not topic:
-            print("No Topic found in input.md. Add a line like: Topic: your research topic")
-            sys.exit(1)
-        if not venue:
-            venue = _parse_field(text, "Venue") or "Workshop, 4-6 pages, double-column"
-        if not constraints:
-            constraints = _parse_field(text, "Constraints") or None
-        if not sections_arg:
-            sections_arg = _parse_field(text, "Sections") or None
-        if not focus:
-            focus = _parse_field(text, "Focus") or None
-
-    if not venue:
-        venue = "Workshop, 4-6 pages, double-column"
-
-    artifacts_root = str(Path.cwd())
-
-    print("==============================================")
-    print("  ResearchBot - Multi-Agent Research Pipeline")
-    print("==============================================")
-    print(f"  Topic:    {topic}")
-    print(f"  Venue:    {venue}")
-    if constraints:
-        print(f"  Constraints: {constraints}")
-    if sections_arg:
-        print(f"  Sections: {sections_arg}")
-    if focus:
-        print(f"  Focus: {focus}")
-    print(f"  Output:   {artifacts_root}")
-    mode = "Browser (Playwright)" if args.browser else "API"
-    print(f"  LLM mode: {mode}")
-    print("==============================================")
-
-    # Configure browser mode
-    from researchbot import config
-    if args.browser:
-        config.set_use_browser_llm(True)
-
-    sections_list = None
-    if sections_arg:
-        sections_list = [s.strip() for s in sections_arg.split(",") if s.strip()]
-
-    from researchbot.orchestrator.pipeline import run_pipeline
-    try:
-        state = run_pipeline(
-            topic, venue, artifacts_root,
-            constraints=constraints,
-            sections=sections_list,
-            focus=focus,
-            resume=args.resume,
-        )
-    finally:
-        if args.browser:
-            try:
-                from researchbot.tools import browser_llm
-                browser_llm.end_browser_session()
-            except Exception:
-                pass
-
-    from researchbot.tools.io import ensure_artifacts_dirs
-    dirs = ensure_artifacts_dirs(artifacts_root)
-
-    print("\n==========================================")
-    print("  ResearchBot pipeline complete")
-    print("==========================================")
-    print(f"  Paper (LaTeX) : {dirs['paper'] / 'main.tex'}")
-    pdf = dirs["paper"] / "main.pdf"
-    print(f"  Paper (PDF)   : {pdf}" + (" OK" if pdf.exists() else " (compilation failed)"))
-    print(f"  References    : {dirs['paper'] / 'references.bib'}")
-    print(f"  Run logs      : {dirs['runs']}")
-    print(f"  Review MDs    : {Path(artifacts_root) / 'review'}")
-    # Self-review results
-    sr = (state.get("self_review") or {}).get("review_result") or {}
-    if sr.get("overall_score"):
-        print(f"  Self-review   : score={sr['overall_score']}/5, {sr.get('overall_assessment', '?')}")
-    # Citation verification
-    cv = (state.get("citation_verification") or {}).get("verification_results") or {}
-    if cv.get("total_citations"):
-        print(f"  Citations     : {cv['total_citations']} total, {cv.get('issues_found', 0)} issue(s), status={cv.get('overall_status', '?')}")
-    # Reviewer scores
-    if state.get("reviewer_outputs"):
-        print("  Reviewer scores:")
-        for r in state["reviewer_outputs"]:
-            print(f"    - {r.get('venue')}: overall={r.get('overall')} -> {r.get('recommendation')}")
-    # Rebuttal
-    if state.get("rebuttal"):
-        rebuttal_path = Path(artifacts_root) / "review" / "09_rebuttal.md"
-        print(f"  Rebuttal      : {rebuttal_path}")
-    print("==========================================")
+def cmd_index(args):
+    """Index Obsidian vault into RAG for context retrieval."""
+    from researchbot.tools.rag import index_obsidian_vault
+    vault_path = args.vault if args.vault else None
+    count = index_obsidian_vault(vault_path=vault_path)
+    print(f"[index] Done. Indexed {count} document chunks.")
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="researchbot",
-        description="ResearchBot: Multi-agent research automation with human-in-the-loop",
+        description="ResearchBot: research assistant toolkit — paper management, idea exploration, and experiment design",
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # init
-    init_parser = subparsers.add_parser("init", help="Create input.md template in current directory")
-    init_parser.add_argument("--force", action="store_true", help="Overwrite existing input.md")
+    # ── init ──
+    init_p = subparsers.add_parser("init", help="Generate config.yaml template")
+    init_p.add_argument("--global", dest="glob", action="store_true",
+                        help="Create in ~/.researchbot/ instead of current directory")
+    init_p.add_argument("--force", action="store_true", help="Overwrite existing config.yaml")
 
-    # run
-    run_parser = subparsers.add_parser("run", help="Run the research pipeline")
-    run_parser.add_argument("--topic", default=None, help="Research topic (overrides input.md)")
-    run_parser.add_argument("--venue", default=None, help="Target venue (default: Workshop, 4-6 pages)")
-    run_parser.add_argument("--constraints", default=None, help="Problem constraints")
-    run_parser.add_argument("--browser", action="store_true", help="Use browser-based ChatGPT (no API key needed)")
-    run_parser.add_argument("--sections", default=None, help="Comma-separated sections to regenerate only")
-    run_parser.add_argument("--focus", default=None, help="Research focus: system | theory | empirical | analysis")
-    run_parser.add_argument("--resume", action="store_true", help="Resume from last completed stage")
+    # ── record ──
+    record_p = subparsers.add_parser("record", help="Record a paper: metadata → Zotero → classify → note → Obsidian")
+    record_p.add_argument("url", help="Paper URL (arXiv, Semantic Scholar, DOI, or direct PDF)")
+    record_p.add_argument("--no-zotero", action="store_true", help="Skip Zotero integration")
+    record_p.add_argument("--vault", default=None, help="Obsidian vault path (override config)")
+
+    # ── note ──
+    note_p = subparsers.add_parser("note", help="Create a structured note from text input")
+    note_p.add_argument("--type", choices=["paper", "idea", "auto"], default="auto",
+                        help="Note type (default: auto-detect)")
+    note_p.add_argument("--input", default=None, help="Input file path (alternative to stdin)")
+    note_p.add_argument("--vault", default=None, help="Obsidian vault path")
+
+    # ── explore ──
+    explore_p = subparsers.add_parser("explore", help="Deep research exploration: Ideator → DeepResearcher → Skeptic")
+    explore_p.add_argument("topic", help="Research topic to explore")
+    explore_p.add_argument("--focus", choices=["system", "theory", "empirical", "analysis"], default=None,
+                           help="Research focus bias")
+    explore_p.add_argument("--obsidian", action="store_true", help="Also save report to Obsidian vault")
+    explore_p.add_argument("--output", default=None, help="Output directory for report")
+    explore_p.add_argument("--browser", action="store_true", help="Use browser-based ChatGPT (no API key)")
+
+    # ── experiment ──
+    experiment_p = subparsers.add_parser("experiment", help="Quick experiment design from a research idea")
+    experiment_p.add_argument("idea", nargs="?", default=None, help="Research idea (or read from stdin)")
+    experiment_p.add_argument("--obsidian", action="store_true", help="Also save to Obsidian vault")
+    experiment_p.add_argument("--output", default=None, help="Output directory for report")
+    experiment_p.add_argument("--browser", action="store_true", help="Use browser-based ChatGPT (no API key)")
+
+    # ── index ──
+    index_p = subparsers.add_parser("index", help="Index Obsidian vault into RAG for context retrieval")
+    index_p.add_argument("--vault", default=None, help="Obsidian vault path")
 
     args = parser.parse_args()
 
     if args.command == "init":
         cmd_init(args)
-    elif args.command == "run":
-        cmd_run(args)
+    elif args.command == "record":
+        cmd_record(args)
+    elif args.command == "note":
+        cmd_note(args)
+    elif args.command == "explore":
+        cmd_explore(args)
+    elif args.command == "experiment":
+        cmd_experiment(args)
+    elif args.command == "index":
+        cmd_index(args)
     else:
         parser.print_help()
         sys.exit(1)

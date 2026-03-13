@@ -1,278 +1,371 @@
 # ResearchBot
 
-Multi-agent research automation with human-in-the-loop. Given a research topic, ResearchBot runs a full pipeline — **ideation, literature review, critique, experiment design, writing, editing, and peer review** — and outputs a workshop-ready LaTeX paper.
+Research assistant toolkit for paper management, idea exploration, experiment design, and knowledge organization. Built around **Zotero** (canonical paper library) + **Obsidian** (editable note layer) with local-first RAG for context retrieval.
 
-Every major stage writes its results to an editable Markdown file. You review and edit the Markdown, confirm, and the pipeline continues with your changes.
+---
+
+## Commands
+
+```bash
+researchbot init                   # Generate config.yaml template
+researchbot record <url>           # Record a paper → Zotero + Obsidian
+researchbot note [--type idea]     # Create a structured note → Obsidian
+researchbot explore <topic>        # Deep research exploration → report
+researchbot experiment <idea>      # Quick experiment design → code scaffolds
+researchbot index                  # Index Obsidian vault into RAG
+```
 
 ---
 
 ## Installation
 
+Requires **Python 3.10+**.
+
 ```bash
-# Basic install (API mode)
+git clone https://github.com/your-repo/ResearchBot.git
+cd ResearchBot
 pip install -e .
 
-# With browser mode (use ChatGPT web UI, no API key needed)
+# With local RAG (ChromaDB + sentence-transformers)
+pip install -e ".[rag]"
+
+# With browser mode (ChatGPT web UI, no API key needed)
 pip install -e ".[browser]"
 playwright install chromium
-
-# With local RAG (long-term memory across runs)
-pip install -e ".[rag]"
 
 # Everything
 pip install -e ".[all]"
 ```
-
-Requires **Python 3.10+**.
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Create input.md template in current directory
-researchbot init
+# 1. Generate config file (either way works)
+researchbot init                      # generates config.yaml in current directory
+# OR: copy the example template
+cp config.yaml.example config.yaml
 
-# 2. Edit input.md with your research topic
-#    (see "Input File Format" below)
+# 2. Edit config.yaml — fill in your API keys and paths (see below)
 
-# 3. Run the pipeline
-researchbot run
+# 3. Start using
+researchbot record https://arxiv.org/abs/2406.12385
 ```
-
-All output files (Markdown reviews, JSON run logs, LaTeX paper) are written to the **current working directory**.
-
----
-
-## Input File Format
-
-`researchbot init` creates an `input.md` template:
-
-```markdown
-Topic: <your research topic here>
-Venue: Workshop, 4-6 pages, double-column
-
-# Optional fields:
-# Constraints: <problem constraints>
-# Sections: experiments,results,conclusion   (only regenerate these sections)
-# Focus: system                              (system | theory | empirical | analysis)
-```
-
-You can also skip `input.md` and pass everything via CLI flags:
-
-```bash
-researchbot run --topic "Your topic" --venue "NeurIPS Workshop, 4 pages"
-```
-
----
-
-## CLI Reference
-
-### `researchbot init`
-
-Creates `input.md` in the current directory.
-
-| Flag | Description |
-|---|---|
-| `--force` | Overwrite existing `input.md` |
-
-### `researchbot run`
-
-Runs the research pipeline.
-
-| Flag | Description |
-|---|---|
-| `--topic TEXT` | Research topic (overrides `input.md`) |
-| `--venue TEXT` | Target venue (default: `Workshop, 4-6 pages, double-column`) |
-| `--constraints TEXT` | Problem constraints |
-| `--browser` | Use ChatGPT via browser automation (no API key needed) |
-| `--sections LIST` | Comma-separated sections to regenerate (e.g. `experiments,results`) |
-| `--focus TYPE` | Research focus: `system`, `theory`, `empirical`, or `analysis` |
-| `--resume` | Resume from last completed stage |
 
 ---
 
 ## Configuration
 
-### Environment Variables
-
-| Variable | Description | Default |
-|---|---|---|
-| `OPENAI_API_KEY` | OpenAI API key (required for API mode) | — |
-| `OPENAI_BASE_URL` | Custom API endpoint (for compatible providers) | OpenAI default |
-| `EFFICIENT_RESEARCH_MODEL` | Model name | `gpt-4o-mini` |
-| `RESEARCHBOT_MAX_REVIEW_ITER` | Max Skeptic/DeepResearch review loops | `2` |
-| `RESEARCHBOT_MAX_WRITE_ITER` | Max Writer rewrite loops | `3` |
-| `EFFICIENT_RESEARCH_RAG_DIR` | RAG storage directory | `<cwd>/rag/` |
-| `EFFICIENT_RESEARCH_COOKIE_FILE` | ChatGPT cookie file for browser mode | — |
-| `EFFICIENT_RESEARCH_BROWSER_MIN_INTERVAL` | Seconds between browser LLM calls | `5` |
-
-### Browser Mode
-
-Browser mode uses Playwright to automate ChatGPT — no API key required.
+All configuration is in **`config.yaml`**. Environment variables also work and take precedence over config.yaml.
 
 ```bash
-researchbot run --browser --topic "Your topic"
+# Generate config template in current directory
+researchbot init
+
+# Or generate in ~/.researchbot/ (global, shared across projects)
+researchbot init --global
 ```
 
-First run: a Chrome window opens — log in to ChatGPT manually. Subsequent runs reuse the session.
+Config file search order:
+1. `./config.yaml` (project-local)
+2. `~/.researchbot/config.yaml` (user-global)
 
-To auto-login, export cookies from a logged-in browser (e.g. via Cookie-Editor extension on chatgpt.com) and set:
+### 1. LLM (required)
+
+You need an LLM API to generate reading notes, classify papers, and run explore/experiment.
+
+```yaml
+llm:
+  api_key: "sk-..."               # Your OpenAI API key
+  base_url: ""                     # Leave empty for OpenAI; set for other providers
+  model: "gpt-4o-mini"            # Model to use
+```
+
+**How to get your API key:**
+- **OpenAI**: Go to [platform.openai.com/api-keys](https://platform.openai.com/api-keys) → "Create new secret key"
+- **DeepSeek**: Go to [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) → create key, set `base_url: "https://api.deepseek.com/v1"` and `model: "deepseek-chat"`
+- **Local vLLM/Ollama**: Set `base_url: "http://localhost:8000/v1"` (or your local port), `api_key: "not-needed"`
+- **Browser mode** (no key needed): Use `--browser` flag on commands — it automates ChatGPT web UI via Playwright
+
+### 2. Obsidian (required)
+
+Point to your Obsidian vault folder — this is where all notes are written.
+
+```yaml
+obsidian:
+  vault_path: "~/ObsidianVault"   # Absolute path to your vault
+```
+
+**How to find your vault path:**
+1. Open Obsidian
+2. Click the vault name (bottom-left) → "Manage vaults"
+3. The path is shown next to your vault name
+4. Or: your vault is just a regular folder — find it in Finder/Explorer
+
+ResearchBot auto-creates this structure inside your vault:
+
+```
+<vault>/
+├── 论文/                    # Paper reading notes (by type)
+│   ├── MLSys/
+│   ├── LLM/
+│   ├── Agents/
+│   ├── RAG/
+│   ├── ...
+│   └── Other/
+├── Idea/                    # Research ideas
+└── Explore/                 # Exploration reports
+```
+
+### 3. Zotero (optional, recommended)
+
+Zotero stores your paper library with PDF attachments. If not configured, `researchbot record` still works — it just skips Zotero.
+
+```yaml
+zotero:
+  api_key: ""                      # Your Zotero API key
+  library_id: ""                   # Your Zotero user ID (numeric)
+  library_type: "user"             # "user" or "group"
+```
+
+**How to get these values:**
+
+1. **API key**: Go to [zotero.org/settings/keys](https://www.zotero.org/settings/keys) → "Create new private key"
+   - Name: `ResearchBot` (or anything)
+   - Check **"Allow library access"** → "Read/Write"
+   - Check **"Allow write access"**
+   - Save → copy the key string
+
+2. **Library ID**: On the same page ([zotero.org/settings/keys](https://www.zotero.org/settings/keys)), look for **"Your userID for use in API calls is ..."** at the top. That number is your `library_id`.
+   - Or: go to [zotero.org/settings/storage](https://www.zotero.org/settings/storage) → the number in the URL (`/users/<number>/...`) is your library ID
+
+3. **Library type**: Use `"user"` for your personal library. Use `"group"` if you want to add papers to a group library (you'll need the group's numeric ID instead).
+
+### 4. RAG (optional, recommended)
+
+RAG enables semantic search across your paper notes during `explore` and `experiment`, so the LLM agents see your existing knowledge.
+
+**Library**: [ChromaDB](https://www.trychroma.com/) (local vector database) + [sentence-transformers](https://www.sbert.net/) (embeddings).
+
+```yaml
+rag:
+  dir: "~/.researchbot/rag"              # Where to store the vector index
+  embedding_model: "all-MiniLM-L6-v2"    # sentence-transformers model
+```
+
+**Setup:**
 ```bash
-export EFFICIENT_RESEARCH_COOKIE_FILE="$HOME/cookies_chatgpt.json"
+# 1. Install RAG dependencies
+pip install -e ".[rag]"
+
+# 2. Index your existing Obsidian vault (run once, then re-run after manual edits)
+researchbot index
 ```
 
----
+After initial indexing, new notes are **automatically indexed** when created via `record` or `note`.
 
-## Pipeline Architecture
+**How context retrieval works** (during `explore`/`experiment`):
+1. **RAG**: semantic search across all indexed notes (fastest, most relevant)
+2. **Zotero**: keyword search in your Zotero library (catches papers not yet in Obsidian)
+3. **Obsidian**: direct file scan with keyword matching (fallback if RAG is not installed)
 
+### 5. Paper Type Taxonomy (optional)
+
+Customize how papers are classified. Default categories cover systems/ML research:
+
+```yaml
+paper_types:
+  - MLSys
+  - Systems
+  - LLM
+  - Agents
+  - RAG
+  - Retrieval
+  - VectorSearch
+  - Databases
+  - Security
+  - Multimodal
+  - Other
 ```
-Phase 1 · Explore    Ideator → Scout → DeepResearcher
-Phase 2 · Review     Skeptic ⟲ DeepResearcher        (loop: up to 2x)
-Phase 3 · Experiment Experimenter
-Phase 4 · Write      Writer ⟲ [DeepResearcher | Experimenter | self]  (loop: up to 3x)
-Phase 5 · Edit       Editor → LaTeX
-Phase 6 · PeerReview Reviewer
+
+Edit this list to add/remove categories (e.g., add `RL`, `NLP`, `CV`). The classifier uses keyword matching + LLM to assign types.
+
+### Full config.yaml example
+
+```yaml
+llm:
+  api_key: "sk-proj-abc123..."
+  base_url: ""
+  model: "gpt-4o-mini"
+
+zotero:
+  api_key: "aB1cD2eF3gH4iJ5kL6"
+  library_id: "12345678"
+  library_type: "user"
+
+obsidian:
+  vault_path: "/Users/you/Documents/MyVault"
+
+rag:
+  dir: "~/.researchbot/rag"
+  embedding_model: "all-MiniLM-L6-v2"
+
+paper_types:
+  - MLSys
+  - Systems
+  - LLM
+  - Agents
+  - RAG
+  - Retrieval
+  - VectorSearch
+  - Databases
+  - Security
+  - Multimodal
+  - Other
 ```
 
-| Agent | Role | Output |
+### Environment Variables (alternative)
+
+Every config field can also be set via env var (takes precedence over config.yaml):
+
+| Env Variable | config.yaml path | Default |
 |---|---|---|
-| **Ideator** | Generate 3-10 falsifiable hypotheses | `HypothesisCard[]` |
-| **Scout** | ArXiv literature search, select best 1-2 hypotheses | `related_work`, `selected_ids` |
-| **DeepResearcher** | Deep literature search, build annotated bibliography | `annotated_bib`, `baseline_checklist`, `gap_summary` |
-| **Skeptic** | Adversarial reviewer — rejection risks and required experiments | `rejection_risks`, `required_experiments` |
-| **Experimenter** | Design experiments and theoretical validation | `experiment_plan`, `theoretical_validation` |
-| **Writer** | Write full LaTeX paper (9 sections) | `sections` dict |
-| **Editor** | Polish academic tone, preserve citation tags | Improved `sections` |
-| **Reviewer** | Simulated peer review with scores | `overall`, `recommendation` |
-
-### Iteration Loops
-
-- Skeptic finds evidence gaps → DeepResearcher re-searches using rejection risks as queries
-- Writer quality gates fail (citation/baseline) → loop back to DeepResearcher + Skeptic
-- Writer quality gates fail (experiment coverage) → loop back to Experimenter
-- Writer quality gates fail (speculation) → Writer self-corrects with `fix_list`
+| `OPENAI_API_KEY` | `llm.api_key` | — |
+| `OPENAI_BASE_URL` | `llm.base_url` | OpenAI default |
+| `RESEARCHBOT_MODEL` | `llm.model` | `gpt-4o-mini` |
+| `RESEARCHBOT_OBSIDIAN_VAULT` | `obsidian.vault_path` | `~/ObsidianVault` |
+| `ZOTERO_API_KEY` | `zotero.api_key` | — |
+| `ZOTERO_LIBRARY_ID` | `zotero.library_id` | — |
+| `ZOTERO_LIBRARY_TYPE` | `zotero.library_type` | `user` |
+| `RESEARCHBOT_RAG_DIR` | `rag.dir` | `~/.researchbot/rag/` |
+| `RESEARCHBOT_RAG_EMBEDDING_MODEL` | `rag.embedding_model` | `all-MiniLM-L6-v2` |
+| `RESEARCHBOT_PAPER_TYPES` | `paper_types` (comma-separated) | See defaults |
+| `SS_API_KEY` | — | — (Semantic Scholar, optional) |
 
 ---
 
-## Human-in-the-Loop
+## Usage
 
-Human review is the default at every major stage:
-
-1. **After Ideator**: Review `review/01_ideator_report.md`. Select which hypotheses to pursue (enter numbers like `1` or `1,3`).
-2. **After DeepResearch**: Review `review/03_deep_research_round_N.md`. Edit the Markdown (add/remove bibliography entries, adjust baselines), then confirm to continue or loop.
-3. **After Experimenter**: Review `review/05_experimenter_report.md`. Edit experiment design, then confirm.
-4. **After Writer**: Review `review/06_writer_report.md`. Edit sections if needed, then confirm.
-
-Edits you make to the Markdown files are read back into the pipeline as the stage output.
-
----
-
-## Output Structure
-
-After a complete run, your working directory contains:
-
-```
-./
-├── review/                     # Editable Markdown reports (one per stage)
-│   ├── 01_ideator_report.md
-│   ├── 03_deep_research_round_1.md
-│   ├── 05_experimenter_report.md
-│   └── 06_writer_report.md
-├── runs/                       # JSON state snapshots
-│   ├── 01_ideator.json
-│   ├── 02_scout.json
-│   ├── 03_deep_research.json   # _iter2, _iter3 etc. for loops
-│   ├── 04_skeptic.json
-│   ├── 05_experimenter.json
-│   ├── 06_writer.json
-│   └── 07_editor.json
-├── paper/
-│   ├── main.tex                # LaTeX paper (IEEEtran double-column)
-│   ├── references.bib          # BibTeX references
-│   └── main.pdf                # Compiled PDF (if LaTeX is installed)
-└── input.md                    # Your research input
-```
-
----
-
-## Quality Gates
-
-The pipeline runs 8 quality checks after Writer and Editor stages. Failed gates trigger automatic correction loops.
-
-| Gate | What it checks | Threshold |
-|---|---|---|
-| `citation_coverage` | `[CITE:]`/`[EVID:]` tag density in intro/related_work | >= 80% |
-| `speculation_ratio` | `[SPEC]` tag ratio in intro/method | <= 20% |
-| `baseline_checklist` | Number of baselines from DeepResearcher | >= 1 |
-| `skeptic_items_closed` | Skeptic concerns addressed in paper | >= 50% |
-| `experiment_evidence_coverage` | `[EVID:]` tags in results/experiments | >= 50% of experiments |
-| `abstract_completeness` | Abstract has evidence tags | Required |
-| `cite_key_validity` | All `[CITE:key]` match annotated_bib | 100% |
-| `section_minimum_length` | Critical sections have sufficient content | >= 30 words each |
-
----
-
-## Debugging
-
-### Check if the pipeline is working
-
-1. **Review Markdown files** in `review/` — they show what each agent produced.
-2. **Inspect JSON logs** in `runs/` — each file contains the raw agent output for that stage.
-3. **Quality gate results** are printed to the terminal after Writer/Editor stages, showing which gates passed/failed and why.
-
-### Common issues
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `OPENAI_API_KEY not set` | No API key configured | Set `export OPENAI_API_KEY="sk-..."` or use `--browser` |
-| Pipeline hangs at "waiting for confirmation" | Normal — it's waiting for you to review the Markdown | Edit the file in `review/`, then type `y` in the terminal |
-| Empty annotated bibliography | Search returned no results | Check your internet connection; try a broader topic |
-| Quality gates keep failing | Writer output doesn't meet thresholds | Check the gate failure reasons in terminal output; the pipeline auto-retries up to `MAX_WRITE_ITER` times |
-| Browser mode: "verify you're human" | ChatGPT bot detection | Delete `~/.chatgpt-bot-profile` and re-run; complete the CAPTCHA manually in the browser window |
-| `ModuleNotFoundError` | Package not installed | Run `pip install -e .` from the repo root |
-
-### Resume after failure
-
-If the pipeline crashes mid-run, use `--resume` to pick up where it left off:
+### Record a paper
 
 ```bash
-researchbot run --resume
+researchbot record https://arxiv.org/abs/2406.12385
+researchbot record https://doi.org/10.1145/1234567
+researchbot record https://arxiv.org/abs/2406.12385 --no-zotero
+researchbot record https://arxiv.org/abs/2406.12385 --vault ~/MyVault
 ```
 
-This loads the last saved state from `runs/` and continues from the next stage.
+What happens:
+1. Parses URL (arXiv, Semantic Scholar, DOI, generic)
+2. Fetches metadata (title, authors, abstract, year, venue)
+3. Checks Zotero for duplicates, adds if new (with PDF attachment)
+4. Classifies paper type via keyword matching + LLM
+5. Generates structured reading note (problem → motivation → method → results → limitations → relevance)
+6. Writes to Obsidian: `论文/<paper_type>/<title>.md`
+7. Indexes into RAG
 
-### Verbose debugging
-
-Inspect individual stage outputs:
+### Create a note
 
 ```bash
-python -c "import json; print(json.dumps(json.load(open('runs/01_ideator.json')), indent=2))"
+researchbot note                                    # interactive input
+researchbot note --input my_thoughts.txt            # from file
+researchbot note --type idea                        # force idea type
+echo "What if we..." | researchbot note --type idea # from stdin
+```
+
+Auto-detects whether input is a paper note or research idea. Ideas go to `Idea/`, paper notes go to `论文/<type>/`.
+
+### Explore a research topic
+
+```bash
+researchbot explore "efficient LLM serving on heterogeneous GPU clusters"
+researchbot explore "vector search indexing" --focus system
+researchbot explore "RAG for code generation" --obsidian
+researchbot explore "multi-agent coordination" --browser
+```
+
+Pipeline: **Context Retrieval → Ideator → DeepResearcher → Skeptic**
+
+Output: `explore/<topic>.md` — hypotheses, gap analysis, annotated bibliography, skeptic review.
+
+### Design experiments
+
+```bash
+researchbot experiment "Use HNSW with learned routing to reduce vector search latency by 2x"
+researchbot experiment --obsidian
+```
+
+Output: `experiments/<idea>.md` — experiment plan, code scaffolds, expected result tables.
+
+### Index vault into RAG
+
+```bash
+researchbot index                   # index default vault
+researchbot index --vault ~/MyVault # index specific vault
 ```
 
 ---
 
-## Local RAG (Long-Term Memory)
+## Obsidian Note Format
 
-Each completed run is indexed into a local vector store (`rag/`). On subsequent runs, the pipeline retrieves relevant context from past research to inform the Ideator.
+All notes use YAML frontmatter for machine-parsability and RAG indexing.
 
-Requires: `pip install -e ".[rag]"`
+### Paper note (`论文/<type>/<title>.md`)
 
-| Variable | Description | Default |
-|---|---|---|
-| `EFFICIENT_RESEARCH_RAG_DIR` | RAG storage path | `<cwd>/rag/` |
-
-Manual indexing of a previous run:
-```python
-from researchbot.tools.rag import index_run_artifacts
-index_run_artifacts("runs")
+```yaml
+---
+title: "Fast Graph Vector Search"
+type: paper
+paper_type: VectorSearch
+authors:
+  - Wenqi Jiang
+  - Hang Hu
+year: 2024
+venue: "SIGMOD"
+source_url: "https://arxiv.org/abs/2406.12385"
+zotero_key: "ABC123"
+tags:
+  - vector-search
+  - graph-index
+  - hardware-acceleration
+created_at: 2024-06-18
+updated_at: 2024-06-18
+---
+# Fast Graph Vector Search
+## Problem
+## Importance
+## Method
+### Motivation
+### Challenge
+### Design
+## Key Results
+## Summary
+## Limitations
+## Insights for My Research
+## Personal Notes
 ```
 
+### Idea note (`Idea/<title>.md`)
+
+```yaml
 ---
-
-## Customizing Agent Behavior
-
-Each agent's system prompt lives in `researchbot/skills/<name>/SKILL.md`. Edit these files to adjust agent behavior (e.g. change hypothesis count, citation style, section lengths).
+title: "Speculative Decoding on Heterogeneous GPUs"
+type: idea
+tags:
+  - llm
+  - inference
+created_at: 2024-06-18
+updated_at: 2024-06-18
+---
+# Speculative Decoding on Heterogeneous GPUs
+## Hypothesis
+## Motivation
+## Related Directions
+## Open Questions
+## Next Steps
+## Personal Notes
+```
 
 ---
 
@@ -280,39 +373,61 @@ Each agent's system prompt lives in `researchbot/skills/<name>/SKILL.md`. Edit t
 
 ```
 researchbot/
-├── cli.py              # CLI entry point (init, run)
-├── config.py           # LLM configuration
-├── agents/             # 8 agents (ideator, scout, deep_researcher, skeptic,
-│                       #           experimenter, writer, editor, reviewer)
+├── cli.py                       # CLI: init, record, note, explore, experiment, index
+├── config.py                    # config.yaml + env var loading
+├── models.py                    # Data models (PaperMetadata, PaperNote, IdeaNote)
+├── agents/                      # LLM agents
+│   ├── ideator.py               # Hypothesis generation, gap analysis
+│   ├── deep_researcher.py       # Literature search, annotated bibliography
+│   ├── skeptic.py               # Adversarial review, feasibility challenge
+│   └── experimenter.py          # Experiment design, code scaffolds
+├── scholar/                     # Paper management
+│   ├── url_parser.py            # URL parsing (arXiv, S2, DOI, generic)
+│   ├── metadata.py              # Metadata fetching (arXiv API, Semantic Scholar)
+│   ├── classifier.py            # Paper type classification (keywords + LLM)
+│   ├── zotero_client.py         # Zotero integration (pyzotero)
+│   ├── note_generator.py        # Structured note generation (LLM)
+│   ├── obsidian_writer.py       # Obsidian vault writing
+│   └── context_retriever.py     # Context retrieval (RAG + Zotero + Obsidian)
 ├── orchestrator/
-│   ├── pipeline.py     # Main pipeline with iteration loops
-│   ├── state.py        # Shared state management
-│   └── human_review.py # Markdown report generation and read-back
+│   ├── explore.py               # Explore pipeline
+│   └── experiment.py            # Experiment pipeline
 ├── tools/
-│   ├── llm.py          # LLM calls (API + browser)
-│   ├── search.py       # ArXiv, Semantic Scholar, DuckDuckGo
-│   ├── browser_llm.py  # Playwright-based ChatGPT automation
-│   ├── citations.py    # BibTeX generation
-│   ├── latex_builder.py# LaTeX document assembly
-│   ├── io.py           # File I/O utilities
-│   ├── rag.py          # Local RAG indexing/retrieval
-│   └── skills_loader.py# SKILL.md prompt loader
-├── eval/
-│   └── gates.py        # Quality gate checks
-└── skills/             # Agent system prompts (SKILL.md files)
+│   ├── llm.py                   # LLM calls (OpenAI-compatible, retry, cache)
+│   ├── search.py                # ArXiv, Semantic Scholar, DuckDuckGo search
+│   ├── rag.py                   # Local RAG (ChromaDB + sentence-transformers)
+│   ├── io.py                    # File I/O (JSON, YAML, markdown)
+│   ├── browser_llm.py           # Playwright-based ChatGPT automation
+│   └── skills_loader.py         # SKILL.md prompt loader
+└── skills/                      # Agent system prompts (SKILL.md files)
 ```
 
 ---
 
-## Citation Tags
+## Browser Mode
 
-Every claim in the generated paper carries one of these tags:
+Uses Playwright to automate ChatGPT — no API key required.
 
-| Tag | Meaning |
+```bash
+researchbot explore "your topic" --browser
+```
+
+First run: a Chrome window opens — log in to ChatGPT manually. Session is reused within the same terminal.
+
+To auto-login with cookies:
+```bash
+export EFFICIENT_RESEARCH_COOKIE_FILE="$HOME/cookies_chatgpt.json"
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
 |---|---|
-| `[CITE:key]` | References a paper in `annotated_bib` |
-| `[EVID:exp_N]` | References an experiment result |
-| `[EVID:ablation_N]` | References an ablation study result |
-| `[SPEC]` | Speculative claim (no supporting evidence) |
-
-These are converted to proper `\cite{}` commands when building the final LaTeX.
+| `OPENAI_API_KEY not set` | Set `llm.api_key` in config.yaml or `export OPENAI_API_KEY="sk-..."` |
+| Zotero skipped | Set `zotero.api_key` and `zotero.library_id` in config.yaml |
+| RAG not working | Run `pip install -e ".[rag]"` then `researchbot index` |
+| Empty metadata | Check URL format; try arXiv abs URL instead of PDF |
+| Browser mode CAPTCHA | Delete `~/.chatgpt-bot-profile` and re-login |
+| Wrong paper classification | Edit `paper_types` in config.yaml, or edit the note manually |
